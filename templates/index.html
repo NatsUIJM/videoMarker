@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频帧标记工具</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            padding: 0;
+        }
+
+        .container {
+            width: 90%;
+            margin: 0 auto;
+        }
+
+        #videoPreview, #capturedFrame {
+            width: 100%;
+            background-color: #f0f0f0;
+            margin: 10px 0;
+        }
+        
+        #videoPreview {
+            height: auto;
+        }
+
+        #capturedFrameContainer {
+            position: relative;
+            width: 100%;
+        }
+
+        #capturedFrame {
+            height: auto;
+            border: 1px solid #ddd;
+        }
+        
+        #annotationCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        
+        #progressContainer {
+            width: 100%;
+            margin: 15px 0;
+        }
+        
+        #videoProgress {
+            width: 100%;
+        }
+        
+        #videoUpload {
+            padding: 8px 16px;
+            margin: 10px 0;
+            cursor: pointer;
+        }
+        
+        .toolBar {
+            display: flex;
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        .tool {
+            flex: 1;
+            padding: 10px;
+            text-align: center;
+            background-color: #eee;
+            cursor: pointer;
+            border: 1px solid #ddd;
+        }
+        
+        .tool.active {
+            background-color: #ddd;
+            font-weight: bold;
+        }
+        
+        #saveBtn {
+            padding: 10px 20px;
+            margin: 15px 0;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        
+        canvas {
+            max-width: 100%;
+            display: block;
+        }
+
+        /* 选中元素的样式 */
+        .handle {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background-color: blue;
+            border: 1px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            cursor: move;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <input type="file" id="videoUpload" accept="video/*">
+        
+        <video id="videoPreview" controls></video>
+        
+        <div id="progressContainer">
+            <input type="range" id="videoProgress" min="0" max="100" value="0" step="0.1">
+        </div>
+        
+        <div class="toolBar">
+            <div class="tool" id="rectangleTool">矩形</div>
+            <div class="tool" id="arrowTool">箭头</div>
+            <div class="tool" id="numberTool">编号</div>
+            <div class="tool" id="textTool">文本</div>
+        </div>
+        
+        <div id="capturedFrameContainer">
+            <canvas id="capturedFrame"></canvas>
+            <canvas id="annotationCanvas"></canvas>
+            <div id="handleContainer"></div>
+        </div>
+        
+        <div class="toolBar">
+            <div class="tool" id="selectTool">选择</div>
+            <div class="tool" id="deleteTool">删除</div>
+            <div class="tool" id="enlargeTool">扩大</div>
+            <div class="tool" id="shrinkTool">缩小</div>
+        </div>
+        
+        <button id="saveBtn">保存标记结果</button>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const videoUpload = document.getElementById('videoUpload');
+            const videoPreview = document.getElementById('videoPreview');
+            const videoProgress = document.getElementById('videoProgress');
+            const capturedFrame = document.getElementById('capturedFrame');
+            const annotationCanvas = document.getElementById('annotationCanvas');
+            const capturedFrameContainer = document.getElementById('capturedFrameContainer');
+            const handleContainer = document.getElementById('handleContainer');
+            const saveBtn = document.getElementById('saveBtn');
+            
+            const ctx = capturedFrame.getContext('2d');
+            const annoCtx = annotationCanvas.getContext('2d');
+            
+            let isSeekingFromProgressBar = false;
+            let currentTool = null;
+            let isDrawing = false;
+            let isDraggingHandle = false;
+            let startX, startY;
+            let annotations = [];
+            let numberCounter = 0;
+            let selectedAnnotation = null;
+            let selectedHandle = null;
+            let textEditing = false;
+            
+            // 样式设置
+            let styles = {
+                rectangle: {
+                    lineWidth: 2,
+                    strokeStyle: 'red'
+                },
+                arrow: {
+                    lineWidth: 2,
+                    strokeStyle: 'red',
+                    fillStyle: 'red'
+                },
+                number: {
+                    radius: 15,
+                    fontSize: 16,
+                    strokeStyle: 'red',
+                    fillStyle: 'rgba(255, 0, 0, 0.3)',
+                    textFillStyle: 'red'
+                },
+                text: {
+                    fontSize: 16,
+                    fillStyle: 'red'
+                }
+            };
+            
+            // 工具按钮
+            const rectangleTool = document.getElementById('rectangleTool');
+            const arrowTool = document.getElementById('arrowTool');
+            const numberTool = document.getElementById('numberTool');
+            const textTool = document.getElementById('textTool');
+            const selectTool = document.getElementById('selectTool');
+            const deleteTool = document.getElementById('deleteTool');
+            const enlargeTool = document.getElementById('enlargeTool');
+            const shrinkTool = document.getElementById('shrinkTool');
+            
+            const drawingTools = [rectangleTool, arrowTool, numberTool, textTool];
+            const editTools = [selectTool, deleteTool, enlargeTool, shrinkTool];
+            const allTools = [...drawingTools, ...editTools];
+            
+            // 处理视频上传
+            videoUpload.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    const fileURL = URL.createObjectURL(file);
+                    videoPreview.src = fileURL;
+                    
+                    // 重置进度条
+                    videoProgress.value = 0;
+                    
+                    // 清除之前的帧和标注
+                    clearCanvas();
+                    annotations = [];
+                    numberCounter = 0;
+                    redrawAnnotations();
+                    clearHandles();
+                }
+            });
+            
+            // 视频元数据加载完成后设置进度条最大值
+            videoPreview.addEventListener('loadedmetadata', function() {
+                videoProgress.max = videoPreview.duration;
+            });
+            
+            // 视频播放时更新进度条
+            videoPreview.addEventListener('timeupdate', function() {
+                if (!isSeekingFromProgressBar) {
+                    videoProgress.value = videoPreview.currentTime;
+                }
+                
+                // 实时预览当前帧
+                if (!videoPreview.paused) {
+                    drawCurrentFrame();
+                }
+            });
+            
+            // 拖动进度条
+            videoProgress.addEventListener('input', function() {
+                isSeekingFromProgressBar = true;
+                videoPreview.currentTime = videoProgress.value;
+                
+                // 实时预览拖动过程中的帧
+                drawCurrentFrame();
+            });
+            
+            videoProgress.addEventListener('change', function() {
+                isSeekingFromProgressBar = false;
+            });
+            
+            // 工具选择
+            allTools.forEach(tool => {
+                tool.addEventListener('click', function() {
+                    allTools.forEach(t => t.classList.remove('active'));
+                    this.classList.add('active');
+                    currentTool = this.id;
+                    
+                    // 重置选中状态
+                    if (drawingTools.includes(this)) {
+                        selectedAnnotation = null;
+                        clearHandles();
+                    }
+                    
+                    // 设置画布的pointer-events属性
+                    if (currentTool === 'selectTool' || currentTool === 'deleteTool' || 
+                        currentTool === 'enlargeTool' || currentTool === 'shrinkTool') {
+                        annotationCanvas.style.pointerEvents = 'auto';
+                    } else if (drawingTools.includes(this)) {
+                        annotationCanvas.style.pointerEvents = 'auto';
+                    } else {
+                        annotationCanvas.style.pointerEvents = 'none';
+                    }
+                });
+            });
+            
+            // 在Canvas上绘制当前帧
+            function drawCurrentFrame() {
+                if (videoPreview.videoWidth && videoPreview.videoHeight) {
+                    capturedFrame.width = videoPreview.videoWidth;
+                    capturedFrame.height = videoPreview.videoHeight;
+                    annotationCanvas.width = videoPreview.videoWidth;
+                    annotationCanvas.height = videoPreview.videoHeight;
+                    ctx.drawImage(videoPreview, 0, 0, capturedFrame.width, capturedFrame.height);
+                    redrawAnnotations();
+                    
+                    // 如果有选中的标注，重新显示控制点
+                    if (selectedAnnotation !== null && currentTool === 'selectTool') {
+                        showHandlesForSelected();
+                    }
+                }
+            }
+            
+            // 清除Canvas
+            function clearCanvas() {
+                ctx.clearRect(0, 0, capturedFrame.width, capturedFrame.height);
+                annoCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+            }
+            
+            // 拖动进度条暂停视频
+            videoProgress.addEventListener('mousedown', function() {
+                if (!videoPreview.paused) {
+                    videoPreview.pause();
+                }
+            });
+            
+            // 标注功能
+            annotationCanvas.addEventListener('mousedown', handleMouseDown);
+            annotationCanvas.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+            annotationCanvas.addEventListener('dblclick', handleDoubleClick);
+            
+            // 使标注画布可以接收鼠标事件
+            annotationCanvas.style.pointerEvents = 'auto';
+            
+            function handleMouseDown(e) {
+                if (!currentTool) return;
+                
+                const rect = annotationCanvas.getBoundingClientRect();
+                const scaleX = annotationCanvas.width / rect.width;
+                const scaleY = annotationCanvas.height / rect.height;
+                
+                startX = (e.clientX - rect.left) * scaleX;
+                startY = (e.clientY - rect.top) * scaleY;
+                
+                if (currentTool === 'selectTool') {
+                    // 查找点击点下的标注
+                    selectedAnnotation = findAnnotationAtPoint(startX, startY);
+                    redrawAnnotations();
+                    
+                    if (selectedAnnotation !== null) {
+                        showHandlesForSelected();
+                        isDrawing = true; // 用于拖动标注
+                    } else {
+                        clearHandles();
+                    }
+                } else if (currentTool === 'deleteTool') {
+                    const annotationIndex = findAnnotationIndexAtPoint(startX, startY);
+                    if (annotationIndex !== -1) {
+                        annotations.splice(annotationIndex, 1);
+                        redrawAnnotations();
+                    }
+                } else if (currentTool === 'enlargeTool' || currentTool === 'shrinkTool') {
+                    // 查找点击点下的标注
+                    const annotation = findAnnotationAtPoint(startX, startY);
+                    if (annotation) {
+                        const type = annotation.type;
+                        const factor = currentTool === 'enlargeTool' ? 1.2 : 0.8;
+                        
+                        // 根据标注类型应用放大或缩小
+                        if (type === 'rectangle' || type === 'arrow') {
+                            // 对线宽进行调整
+                            styles[type].lineWidth = Math.max(1, styles[type].lineWidth * factor);
+                        } else if (type === 'number') {
+                            // 对圆半径和字体大小进行调整
+                            styles.number.radius = Math.max(5, styles.number.radius * factor);
+                            styles.number.fontSize = Math.max(8, styles.number.fontSize * factor);
+                        } else if (type === 'text') {
+                            // 对字体大小进行调整
+                            styles.text.fontSize = Math.max(8, styles.text.fontSize * factor);
+                        }
+                        
+                        redrawAnnotations();
+                    }
+                } else if (currentTool === 'rectangleTool' || currentTool === 'arrowTool') {
+                    isDrawing = true;
+                } else if (currentTool === 'numberTool') {
+                    numberCounter++;
+                    annotations.push({
+                        type: 'number',
+                        x: startX,
+                        y: startY,
+                        value: numberCounter
+                    });
+                    redrawAnnotations();
+                } else if (currentTool === 'textTool') {
+                    annotations.push({
+                        type: 'text',
+                        x: startX,
+                        y: startY,
+                        text: '文本'
+                    });
+                    redrawAnnotations();
+                }
+            }
+            
+            function handleMouseMove(e) {
+                if (!isDrawing && !isDraggingHandle) return;
+                
+                const rect = annotationCanvas.getBoundingClientRect();
+                const scaleX = annotationCanvas.width / rect.width;
+                const scaleY = annotationCanvas.height / rect.height;
+                
+                const currentX = (e.clientX - rect.left) * scaleX;
+                const currentY = (e.clientY - rect.top) * scaleY;
+                
+                // 计算移动差值
+                const deltaX = currentX - startX;
+                const deltaY = currentY - startY;
+                
+                // 实时绘制预览
+                annoCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+                
+                if (currentTool === 'selectTool') {
+                    if (isDraggingHandle && selectedHandle !== null) {
+                        // 移动控制点
+                        moveHandle(selectedHandle, currentX, currentY);
+                    } else if (isDrawing && selectedAnnotation !== null) {
+                        // 移动整个标注
+                        moveAnnotation(selectedAnnotation, deltaX, deltaY);
+                        startX = currentX;
+                        startY = currentY;
+                    }
+                } else if (currentTool === 'rectangleTool') {
+                    redrawAnnotations();
+                    drawRectangle(startX, startY, currentX - startX, currentY - startY);
+                } else if (currentTool === 'arrowTool') {
+                    redrawAnnotations();
+                    drawArrow(startX, startY, currentX, currentY);
+                }
+                
+                // 更新控制点位置
+                if ((isDraggingHandle || isDrawing) && currentTool === 'selectTool' && selectedAnnotation !== null) {
+                    updateHandlePositions();
+                }
+            }
+            
+            function handleMouseUp(e) {
+                if (!isDrawing && !isDraggingHandle) return;
+                
+                if (isDraggingHandle) {
+                    isDraggingHandle = false;
+                    selectedHandle = null;
+                }
+                
+                if (!isDrawing) return;
+                
+                const rect = annotationCanvas.getBoundingClientRect();
+                const scaleX = annotationCanvas.width / rect.width;
+                const scaleY = annotationCanvas.height / rect.height;
+                
+                const endX = (e.clientX - rect.left) * scaleX;
+                const endY = (e.clientY - rect.top) * scaleY;
+                
+                if (currentTool === 'rectangleTool') {
+                    annotations.push({
+                        type: 'rectangle',
+                        x: Math.min(startX, endX),
+                        y: Math.min(startY, endY),
+                        width: Math.abs(endX - startX),
+                        height: Math.abs(endY - startY)
+                    });
+                } else if (currentTool === 'arrowTool') {
+                    annotations.push({
+                        type: 'arrow',
+                        x1: startX,
+                        y1: startY,
+                        x2: endX,
+                        y2: endY
+                    });
+                }
+                
+                isDrawing = false;
+                redrawAnnotations();
+                
+                // 如果是选择工具，更新控制点
+                if (currentTool === 'selectTool' && selectedAnnotation !== null) {
+                    showHandlesForSelected();
+                }
+            }
+            
+            function handleDoubleClick(e) {
+                if (currentTool !== 'selectTool') return;
+                
+                const rect = annotationCanvas.getBoundingClientRect();
+                const scaleX = annotationCanvas.width / rect.width;
+                const scaleY = annotationCanvas.height / rect.height;
+                
+                const clickX = (e.clientX - rect.left) * scaleX;
+                const clickY = (e.clientY - rect.top) * scaleY;
+                
+                // 查找双击的标注
+                const annotation = findAnnotationAtPoint(clickX, clickY);
+                
+                if (annotation && annotation.type === 'text') {
+                    // 如果是文本标注，允许编辑
+                    const newText = prompt('编辑文本:', annotation.text);
+                    if (newText !== null) {
+                        annotation.text = newText;
+                        redrawAnnotations();
+                        
+                        if (selectedAnnotation === annotation) {
+                            showHandlesForSelected();
+                        }
+                    }
+                }
+            }
+            
+            function drawRectangle(x, y, width, height) {
+                annoCtx.strokeStyle = styles.rectangle.strokeStyle;
+                annoCtx.lineWidth = styles.rectangle.lineWidth;
+                
+                // 确保始终绘制正矩形，即使用户反向拖动
+                const drawX = width < 0 ? x + width : x;
+                const drawY = height < 0 ? y + height : y;
+                const drawWidth = Math.abs(width);
+                const drawHeight = Math.abs(height);
+                
+                annoCtx.strokeRect(drawX, drawY, drawWidth, drawHeight);
+            }
+            
+            function drawArrow(fromX, fromY, toX, toY) {
+                // 箭头主干
+                annoCtx.beginPath();
+                annoCtx.moveTo(fromX, fromY);
+                annoCtx.lineTo(toX, toY);
+                annoCtx.strokeStyle = styles.arrow.strokeStyle;
+                annoCtx.lineWidth = styles.arrow.lineWidth;
+                annoCtx.stroke();
+                
+                // 箭头头部
+                const headLength = 15;
+                const angle = Math.atan2(toY - fromY, toX - fromX);
+                
+                annoCtx.beginPath();
+                annoCtx.moveTo(toX, toY);
+                annoCtx.lineTo(
+                    toX - headLength * Math.cos(angle - Math.PI / 6),
+                    toY - headLength * Math.sin(angle - Math.PI / 6)
+                );
+                annoCtx.lineTo(
+                    toX - headLength * Math.cos(angle + Math.PI / 6),
+                    toY - headLength * Math.sin(angle + Math.PI / 6)
+                );
+                annoCtx.closePath();
+                annoCtx.fillStyle = styles.arrow.fillStyle;
+                annoCtx.fill();
+            }
+            
+            function drawNumber(x, y, number) {
+                // 绘制圆圈
+                annoCtx.beginPath();
+                annoCtx.arc(x, y, styles.number.radius, 0, Math.PI * 2);
+                annoCtx.fillStyle = styles.number.fillStyle;
+                annoCtx.fill();
+                annoCtx.strokeStyle = styles.number.strokeStyle;
+                annoCtx.lineWidth = 2;
+                annoCtx.stroke();
+                
+                // 绘制数字
+                annoCtx.font = `bold ${styles.number.fontSize}px Arial`;
+                annoCtx.fillStyle = styles.number.textFillStyle;
+                annoCtx.textAlign = 'center';
+                annoCtx.textBaseline = 'middle';
+                annoCtx.fillText(number, x, y);
+            }
+            
+            function drawText(x, y, text) {
+                annoCtx.font = `${styles.text.fontSize}px Arial`;
+                annoCtx.fillStyle = styles.text.fillStyle;
+                annoCtx.textAlign = 'left';
+                annoCtx.textBaseline = 'top';
+                annoCtx.fillText(text, x, y);
+            }
+            
+            function redrawAnnotations() {
+                annoCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+                
+                for (const anno of annotations) {
+                    if (anno.type === 'rectangle') {
+                        drawRectangle(anno.x, anno.y, anno.width, anno.height);
+                    } else if (anno.type === 'arrow') {
+                        drawArrow(anno.x1, anno.y1, anno.x2, anno.y2);
+                    } else if (anno.type === 'number') {
+                        drawNumber(anno.x, anno.y, anno.value);
+                    } else if (anno.type === 'text') {
+                        drawText(anno.x, anno.y, anno.text);
+                    }
+                }
+                
+                // 高亮显示选中的标注
+                if (selectedAnnotation !== null) {
+                    highlightSelectedAnnotation();
+                }
+            }
+            
+            function highlightSelectedAnnotation() {
+                annoCtx.save();
+                
+                if (selectedAnnotation.type === 'rectangle') {
+                    annoCtx.strokeStyle = 'blue';
+                    annoCtx.lineWidth = 2;
+                    annoCtx.setLineDash([5, 5]);
+                    annoCtx.strokeRect(
+                        selectedAnnotation.x, 
+                        selectedAnnotation.y, 
+                        selectedAnnotation.width, 
+                        selectedAnnotation.height
+                    );
+                } else if (selectedAnnotation.type === 'arrow') {
+                    annoCtx.strokeStyle = 'blue';
+                    annoCtx.lineWidth = 2;
+                    annoCtx.setLineDash([5, 5]);
+                    annoCtx.beginPath();
+                    annoCtx.moveTo(selectedAnnotation.x1, selectedAnnotation.y1);
+                    annoCtx.lineTo(selectedAnnotation.x2, selectedAnnotation.y2);
+                    annoCtx.stroke();
+                } else if (selectedAnnotation.type === 'number') {
+                    annoCtx.strokeStyle = 'blue';
+                    annoCtx.lineWidth = 2;
+                    annoCtx.setLineDash([5, 5]);
+                    annoCtx.beginPath();
+                    annoCtx.arc(selectedAnnotation.x, selectedAnnotation.y, styles.number.radius + 3, 0, Math.PI * 2);
+                    annoCtx.stroke();
+                } else if (selectedAnnotation.type === 'text') {
+                    const metrics = annoCtx.measureText(selectedAnnotation.text);
+                    const height = styles.text.fontSize + 4; // 近似文本高度
+                    
+                    annoCtx.strokeStyle = 'blue';
+                    annoCtx.lineWidth = 2;
+                    annoCtx.setLineDash([5, 5]);
+                    annoCtx.strokeRect(
+                        selectedAnnotation.x - 2, 
+                        selectedAnnotation.y - 2, 
+                        metrics.width + 4, 
+                        height + 4
+                    );
+                }
+                
+                annoCtx.restore();
+            }
+            
+            // 选择工具函数
+            function findAnnotationAtPoint(x, y) {
+                // 从后往前检查，以便选择最上层的标注
+                for (let i = annotations.length - 1; i >= 0; i--) {
+                    const anno = annotations[i];
+                    
+                    if (anno.type === 'rectangle') {
+                        if (x >= anno.x && x <= anno.x + anno.width &&
+                            y >= anno.y && y <= anno.y + anno.height) {
+                            return anno;
+                        }
+                    } else if (anno.type === 'arrow') {
+                        // 检查用户是否点击了箭头线段附近
+                        const distance = distanceToLine(x, y, anno.x1, anno.y1, anno.x2, anno.y2);
+                        if (distance < 5) { // 5像素的容差
+                            return anno;
+                        }
+                    } else if (anno.type === 'number') {
+                        // 检查用户是否点击了编号圆圈
+                        const distance = Math.sqrt((x - anno.x) ** 2 + (y - anno.y) ** 2);
+                        if (distance <= styles.number.radius) { // 圆的半径
+                            return anno;
+                        }
+                    } else if (anno.type === 'text') {
+                        // 检查用户是否点击了文本区域
+                        const metrics = annoCtx.measureText(anno.text);
+                        const height = styles.text.fontSize + 4; // 近似文本高度
+                        
+                        if (x >= anno.x && x <= anno.x + metrics.width &&
+                            y >= anno.y && y <= anno.y + height) {
+                            return anno;
+                        }
+                    }
+                }
+                
+                return null;
+            }
+            
+            function findAnnotationIndexAtPoint(x, y) {
+                for (let i = annotations.length - 1; i >= 0; i--) {
+                    const anno = annotations[i];
+                    
+                    if (anno.type === 'rectangle') {
+                        if (x >= anno.x && x <= anno.x + anno.width &&
+                            y >= anno.y && y <= anno.y + anno.height) {
+                            return i;
+                        }
+                    } else if (anno.type === 'arrow') {
+                        const distance = distanceToLine(x, y, anno.x1, anno.y1, anno.x2, anno.y2);
+                        if (distance < 5) {
+                            return i;
+                        }
+                    } else if (anno.type === 'number') {
+                        const distance = Math.sqrt((x - anno.x) ** 2 + (y - anno.y) ** 2);
+                        if (distance <= styles.number.radius) {
+                            return i;
+                        }
+                    } else if (anno.type === 'text') {
+                        const metrics = annoCtx.measureText(anno.text);
+                        const height = styles.text.fontSize + 4;
+                        
+                        if (x >= anno.x && x <= anno.x + metrics.width &&
+                            y >= anno.y && y <= anno.y + height) {
+                            return i;
+                        }
+                    }
+                }
+                
+                return -1;
+            }
+            
+            function distanceToLine(x, y, x1, y1, x2, y2) {
+                const A = x - x1;
+                const B = y - y1;
+                const C = x2 - x1;
+                const D = y2 - y1;
+                
+                const dot = A * C + B * D;
+                const len_sq = C * C + D * D;
+                let param = -1;
+                
+                if (len_sq != 0) {
+                    param = dot / len_sq;
+                }
+                
+                let xx, yy;
+                
+                if (param < 0) {
+                    xx = x1;
+                    yy = y1;
+                } else if (param > 1) {
+                    xx = x2;
+                    yy = y2;
+                } else {
+                    xx = x1 + param * C;
+                    yy = y1 + param * D;
+                }
+                
+                const dx = x - xx;
+                const dy = y - yy;
+                
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+            
+            function moveAnnotation(annotation, deltaX, deltaY) {
+                if (annotation.type === 'rectangle') {
+                    annotation.x += deltaX;
+                    annotation.y += deltaY;
+                } else if (annotation.type === 'arrow') {
+                    annotation.x1 += deltaX;
+                    annotation.y1 += deltaY;
+                    annotation.x2 += deltaX;
+                    annotation.y2 += deltaY;
+                } else if (annotation.type === 'number') {
+                    annotation.x += deltaX;
+                    annotation.y += deltaY;
+                } else if (annotation.type === 'text') {
+                    annotation.x += deltaX;
+                    annotation.y += deltaY;
+                }
+                
+                redrawAnnotations();
+            }
+            
+            // 控制点相关函数
+            function showHandlesForSelected() {
+                clearHandles();
+                
+                if (!selectedAnnotation) return;
+                
+                if (selectedAnnotation.type === 'rectangle') {
+                    // 四个角的控制点
+                    createHandle(selectedAnnotation.x, selectedAnnotation.y, 'nw');
+                    createHandle(selectedAnnotation.x + selectedAnnotation.width, selectedAnnotation.y, 'ne');
+                    createHandle(selectedAnnotation.x, selectedAnnotation.y + selectedAnnotation.height, 'sw');
+                    createHandle(selectedAnnotation.x + selectedAnnotation.width, selectedAnnotation.y + selectedAnnotation.height, 'se');
+                } else if (selectedAnnotation.type === 'arrow') {
+                    // 起点和终点控制点
+                    createHandle(selectedAnnotation.x1, selectedAnnotation.y1, 'start');
+                    createHandle(selectedAnnotation.x2, selectedAnnotation.y2, 'end');
+                } else if (selectedAnnotation.type === 'number') {
+                    // 中心控制点
+                    createHandle(selectedAnnotation.x, selectedAnnotation.y, 'center');
+                } else if (selectedAnnotation.type === 'text') {
+                    // 左上角控制点
+                    createHandle(selectedAnnotation.x, selectedAnnotation.y, 'start');
+                }
+            }
+            
+            function createHandle(x, y, position) {
+                const rect = annotationCanvas.getBoundingClientRect();
+                const scaleX = rect.width / annotationCanvas.width;
+                const scaleY = rect.height / annotationCanvas.height;
+                
+                const handle = document.createElement('div');
+                handle.className = 'handle';
+                handle.dataset.position = position;
+                handle.style.left = (x * scaleX) + 'px';
+                handle.style.top = (y * scaleY) + 'px';
+                
+                // 为控制点添加事件监听器
+                handle.addEventListener('mousedown', function(e) {
+                    e.stopPropagation();
+                    selectedHandle = this;
+                    isDraggingHandle = true;
+                });
+                
+                handleContainer.appendChild(handle);
+            }
+            
+            function clearHandles() {
+                while (handleContainer.firstChild) {
+                    handleContainer.removeChild(handleContainer.firstChild);
+                }
+            }
+            
+            function updateHandlePositions() {
+                clearHandles();
+                showHandlesForSelected();
+            }
+            
+            function moveHandle(handle, x, y) {
+                const position = handle.dataset.position;
+                
+                if (selectedAnnotation.type === 'rectangle') {
+                    if (position === 'nw') {
+                        const newWidth = selectedAnnotation.width + (selectedAnnotation.x - x);
+                        const newHeight = selectedAnnotation.height + (selectedAnnotation.y - y);
+                        
+                        if (newWidth > 0 && newHeight > 0) {
+                            selectedAnnotation.x = x;
+                            selectedAnnotation.y = y;
+                            selectedAnnotation.width = newWidth;
+                            selectedAnnotation.height = newHeight;
+                        }
+                    } else if (position === 'ne') {
+                        const newWidth = x - selectedAnnotation.x;
+                        const newHeight = selectedAnnotation.height + (selectedAnnotation.y - y);
+                        
+                        if (newWidth > 0 && newHeight > 0) {
+                            selectedAnnotation.y = y;
+                            selectedAnnotation.width = newWidth;
+                            selectedAnnotation.height = newHeight;
+                        }
+                    } else if (position === 'sw') {
+                        const newWidth = selectedAnnotation.width + (selectedAnnotation.x - x);
+                        const newHeight = y - selectedAnnotation.y;
+                        
+                        if (newWidth > 0 && newHeight > 0) {
+                            selectedAnnotation.x = x;
+                            selectedAnnotation.width = newWidth;
+                            selectedAnnotation.height = newHeight;
+                        }
+                    } else if (position === 'se') {
+                        const newWidth = x - selectedAnnotation.x;
+                        const newHeight = y - selectedAnnotation.y;
+                        
+                        if (newWidth > 0 && newHeight > 0) {
+                            selectedAnnotation.width = newWidth;
+                            selectedAnnotation.height = newHeight;
+                        }
+                    }
+                } else if (selectedAnnotation.type === 'arrow') {
+                    if (position === 'start') {
+                        selectedAnnotation.x1 = x;
+                        selectedAnnotation.y1 = y;
+                    } else if (position === 'end') {
+                        selectedAnnotation.x2 = x;
+                        selectedAnnotation.y2 = y;
+                    }
+                } else if (selectedAnnotation.type === 'number') {
+                    if (position === 'center') {
+                        selectedAnnotation.x = x;
+                        selectedAnnotation.y = y;
+                    }
+                } else if (selectedAnnotation.type === 'text') {
+                    if (position === 'start') {
+                        selectedAnnotation.x = x;
+                        selectedAnnotation.y = y;
+                    }
+                }
+                
+                redrawAnnotations();
+            }
+            
+            // 保存标记结果
+            saveBtn.addEventListener('click', function() {
+                // 创建一个合并了视频帧和标注的画布
+                const mergedCanvas = document.createElement('canvas');
+                mergedCanvas.width = capturedFrame.width;
+                mergedCanvas.height = capturedFrame.height;
+                const mergedCtx = mergedCanvas.getContext('2d');
+                
+                // 绘制视频帧
+                mergedCtx.drawImage(capturedFrame, 0, 0);
+                
+                // 绘制标注
+                mergedCtx.drawImage(annotationCanvas, 0, 0);
+                
+                // 将合并后的画布转换为图片并下载
+                const timestamp = videoPreview.currentTime.toFixed(2);
+                const imageUrl = mergedCanvas.toDataURL('image/png');
+                const a = document.createElement('a');
+                a.href = imageUrl;
+                a.download = `frame_${timestamp}_s.png`;
+                a.click();
+                
+                // 还可以保存标注数据为JSON
+                const annotationData = {
+                    timestamp: timestamp,
+                    annotations: annotations,
+                    styles: styles  // 保存样式设置
+                };
+                
+                const jsonData = JSON.stringify(annotationData);
+                const jsonBlob = new Blob([jsonData], {type: 'application/json'});
+                const jsonUrl = URL.createObjectURL(jsonBlob);
+                const jsonLink = document.createElement('a');
+                jsonLink.href = jsonUrl;
+                jsonLink.download = `frame_${timestamp}_s_annotations.json`;
+                jsonLink.click();
+            });
+        });
+    </script>
+</body>
+</html>
