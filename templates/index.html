@@ -901,21 +901,6 @@
                 a.href = imageUrl;
                 a.download = `frame_${timestamp}_s.png`;
                 a.click();
-                
-                // 还可以保存标注数据为JSON
-                const annotationData = {
-                    timestamp: timestamp,
-                    annotations: annotations,
-                    styles: styles  // 保存样式设置
-                };
-                
-                const jsonData = JSON.stringify(annotationData);
-                const jsonBlob = new Blob([jsonData], {type: 'application/json'});
-                const jsonUrl = URL.createObjectURL(jsonBlob);
-                const jsonLink = document.createElement('a');
-                jsonLink.href = jsonUrl;
-                jsonLink.download = `frame_${timestamp}_s_annotations.json`;
-                jsonLink.click();
             });
         });
     </script>
